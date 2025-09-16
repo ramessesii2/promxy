@@ -109,6 +109,9 @@ type cliOpts struct {
 	ResendDelay               time.Duration `long:"rules.alert.resend-delay" description:"Minimum amount of time to wait before resending an alert to Alertmanager." default:"1m"`
 	AlertBackfill             bool          `long:"rules.alertbackfill" description:"Enable promxy to recalculate alert state on startup when the downstream datastore doesn't have an ALERTS_FOR_STATE"`
 
+	GeneratorURLTemplate string `long:"rules.alert.generator-url-template" description:"Go template for generating alert URLs. Available variables: .ExternalURL, .Expr, .Labels, .Annotations, .AlertName. Example for Grafana: 'https://grafana.example.com/alerting/groups?queryString=alertname%3D\"{{.AlertName | urlquery}}\"'" default:""`
+	TemplateDirectory    string `long:"rules.alert.template-dir" description:"Directory containing external template files (.tmpl or .template extensions)" default:""`
+
 	ShutdownDelay   time.Duration `long:"http.shutdown-delay" description:"time to wait before shutting down the http server, this allows for a grace period for upstreams (e.g. LoadBalancers) to discover the new stopping status through healthchecks" default:"10s"`
 	ShutdownTimeout time.Duration `long:"http.shutdown-timeout" description:"max time to wait for a graceful shutdown of the HTTP server" default:"60s"`
 }
@@ -122,6 +125,9 @@ func (c *cliOpts) ToFlags() map[string]string {
 }
 
 var opts cliOpts
+
+// Global variable to hold current alerting configuration
+var currentAlertingConfig *proxyconfig.AlertingConfig
 
 func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, rls ...proxyconfig.Reloadable) (err error) {
 	defer func() {
@@ -137,6 +143,24 @@ func reloadConfig(noStepSuqueryInterval *safePromQLNoStepSubqueryInterval, rls .
 	if err != nil {
 		return fmt.Errorf("error loading cfg: %v", err)
 	}
+
+	// Override alerting configuration from CLI if provided
+	if opts.GeneratorURLTemplate != "" {
+		cfg.PromxyConfig.Alerting.GeneratorURLTemplate = opts.GeneratorURLTemplate
+	}
+	if opts.TemplateDirectory != "" {
+		cfg.PromxyConfig.Alerting.TemplateDirectory = opts.TemplateDirectory
+	}
+
+	// Re-initialize templates with any CLI overrides
+	if opts.GeneratorURLTemplate != "" || opts.TemplateDirectory != "" {
+		if err := cfg.PromxyConfig.Alerting.SetTemplate(); err != nil {
+			return fmt.Errorf("error setting templates from CLI: %v", err)
+		}
+	}
+
+	// Update the global alerting config
+	currentAlertingConfig = &cfg.PromxyConfig.Alerting
 
 	failed := false
 	for _, rl := range rls {
@@ -322,7 +346,7 @@ func main() {
 		Context:         ctx,         // base context for all background tasks
 		ExternalURL:     externalUrl, // URL listed as URL for "who fired this alert"
 		QueryFunc:       rules.EngineQueryFunc(engine, proxyStorage),
-		NotifyFunc:      sendAlerts(notifierManager, externalUrl.String()),
+		NotifyFunc:      sendAlerts(notifierManager, externalUrl.String(), nil),
 		Appendable:      proxyStorage,
 		Queryable:       ruleQueryable,
 		Logger:          logger,
@@ -540,7 +564,7 @@ func main() {
 
 // sendAlerts implements the rules.NotifyFunc for a Notifier.
 // It filters any non-firing alerts from the input.
-func sendAlerts(n *notifier.Manager, externalURL string) rules.NotifyFunc {
+func sendAlerts(n *notifier.Manager, externalURL string, alertingConfig *proxyconfig.AlertingConfig) rules.NotifyFunc {
 	return func(ctx context.Context, expr string, alerts ...*rules.Alert) {
 		var res []*notifier.Alert
 
@@ -549,11 +573,61 @@ func sendAlerts(n *notifier.Manager, externalURL string) rules.NotifyFunc {
 			if alert.State == rules.StatePending {
 				continue
 			}
+
+			// Generate URL using the configured template
+			var generatorURL string
+			// Use the most current alerting config if available, otherwise fall back to the passed parameter
+			activeConfig := currentAlertingConfig
+			if activeConfig == nil {
+				activeConfig = alertingConfig
+			}
+
+			if activeConfig != nil && activeConfig.GetTemplateCount() > 0 {
+				templateData := proxyconfig.CreateTemplateData(externalURL, expr, alert.Labels, alert.Annotations)
+
+				// Check if using legacy single template mode
+				if activeConfig.GetTemplate() != nil {
+					// Legacy mode: use single template
+					templateDataMap := map[string]interface{}{
+						"ExternalURL": templateData.ExternalURL,
+						"Expr":        templateData.Expr,
+						"Labels":      templateData.Labels,
+						"Annotations": templateData.Annotations,
+						"AlertName":   templateData.AlertName,
+					}
+
+					if url, err := activeConfig.GenerateURL(templateDataMap); err != nil {
+						logrus.Errorf("Failed to generate URL from legacy template, falling back to default: %v", err)
+						generatorURL = externalURL + strutil.TableLinkForExpression(expr)
+					} else {
+						generatorURL = url
+					}
+				} else {
+					// Enhanced mode: use template selection
+					templateName := activeConfig.SelectTemplate(alert.Labels, alert.Annotations)
+
+					if templateName == "" {
+						// No template selected, fall back to default
+						generatorURL = externalURL + strutil.TableLinkForExpression(expr)
+					} else {
+						if url, err := activeConfig.GenerateURLWithTemplate(templateName, templateData); err != nil {
+							logrus.Errorf("Failed to generate URL with template '%s', falling back to default: %v", templateName, err)
+							generatorURL = externalURL + strutil.TableLinkForExpression(expr)
+						} else {
+							generatorURL = url
+						}
+					}
+				}
+			} else {
+				// Fallback to original behavior
+				generatorURL = externalURL + strutil.TableLinkForExpression(expr)
+			}
+
 			a := &notifier.Alert{
 				StartsAt:     alert.FiredAt,
 				Labels:       alert.Labels,
 				Annotations:  alert.Annotations,
-				GeneratorURL: externalURL + strutil.TableLinkForExpression(expr),
+				GeneratorURL: generatorURL,
 			}
 			if !alert.ResolvedAt.IsZero() {
 				a.EndsAt = alert.ResolvedAt

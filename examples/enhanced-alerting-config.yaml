@@ -1,0 +1,110 @@
+##
+## Enhanced Alerting Configuration Examples
+##
+
+global:
+  evaluation_interval: 15s
+  external_labels:
+    source: promxy
+
+# Rule files specifies a list of globs. Rules and alerts are read from
+# all matching files.
+rule_files:
+- "*rule"
+
+# Alerting specifies settings related to the Alertmanager.
+alerting:
+  alertmanagers:
+  - scheme: http
+    static_configs:
+    - targets:
+      - "127.0.0.1:9093"
+
+# Remote write configuration
+remote_write:
+  - url: http://localhost:8083/receive
+
+##
+### Enhanced Promxy Alerting Configuration
+##
+promxy:
+  # Enhanced alerting configuration with template selection
+  alerting:
+    # Template directory for external template files
+    template_directory: "/etc/promxy/templates"
+    
+    # Default template (fallback when no rules match)
+    default_template: "grafana_default"
+    
+    # Template selection rules (evaluated in order)
+    template_rules:
+      # Critical alerts go to PagerDuty
+      - match_labels:
+          severity: "critical"
+        template: "pagerduty_critical"
+      
+      # Database team alerts go to specific dashboard  
+      - match_labels:
+          team: "database"
+        template: "db_dashboard"
+      
+      # Alerts with runbook URLs go to runbook
+      - match_annotations:
+          runbook_url: "*"  # Match any value
+        template: "runbook_redirect"
+      
+      # Infrastructure alerts with specific handling
+      - match_labels:
+          team: "infrastructure"
+          severity: "warning"
+        template: "infra_dashboard"
+    
+    # Inline templates (alternative to external files)
+    templates:
+      # Default Grafana alerting page
+      grafana_default: |
+        https://grafana.example.com/alerting/groups?queryString=alertname%3D"{{.AlertName | urlquery}}"
+      
+      # Critical alerts to PagerDuty
+      pagerduty_critical: |
+        https://company.pagerduty.com/incidents/new?alert={{.AlertName | urlquery}}&severity={{.Labels.severity | urlquery}}&cluster={{.Labels.cluster | urlquery}}&description={{.Annotations.summary | urlquery}}
+      
+      # Database-specific dashboard
+      db_dashboard: |
+        https://grafana.example.com/d/database-overview?var-instance={{.Labels.instance | urlquery}}&var-job={{.Labels.job | urlquery}}&from=now-1h&to=now&alert={{.AlertName | urlquery}}
+      
+      # Infrastructure team dashboard
+      infra_dashboard: |
+        https://grafana.example.com/d/infrastructure?var-cluster={{.Labels.cluster | urlquery}}&var-severity={{.Labels.severity | urlquery}}&alert={{.AlertName | urlquery}}
+      
+      # Redirect to runbook URL from annotations
+      runbook_redirect: |
+        {{.Annotations.runbook_url}}?alert={{.AlertName | urlquery}}&instance={{.Labels.instance | urlquery}}
+
+  server_groups:
+    # All upstream prometheus instances
+    - static_configs:
+        - targets: 
+          - localhost:9090
+      # labels to be added to metrics retrieved from this server_group
+      labels:
+        sg: localhost_9090
+
+##
+### Example External Template Files
+##
+
+# File: /etc/promxy/templates/slack_webhook.tmpl
+# https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK?alert={{.AlertName | urlquery}}&severity={{.Labels.severity | urlquery}}
+
+# File: /etc/promxy/templates/custom_incident.tmpl
+# https://incident.company.com/create?
+#   title={{.Annotations.summary | urlquery}}&
+#   description={{.Annotations.description | urlquery}}&
+#   severity={{.Labels.severity | urlquery}}&
+#   team={{.Labels.team | urlquery}}&
+#   alert_expr={{.Expr | urlquery}}
+
+# File: /etc/promxy/templates/multi_tenant.tmpl  
+# https://{{.Labels.tenant}}.grafana.company.com/alerting/groups?
+#   queryString=alertname%3D"{{.AlertName | urlquery}}"%20cluster%3D"{{.Labels.cluster | urlquery}}"

@@ -1,0 +1,1 @@
+https://company.pagerduty.com/incidents/new?incident%5Btitle%5D={{.Annotations.summary | urlquery}}&incident%5Bdescription%5D={{.Annotations.description | urlquery}}&incident%5Bpriority%5D={{.Labels.severity | urlquery}}&incident%5Bservice%5D={{.Labels.service | urlquery}}

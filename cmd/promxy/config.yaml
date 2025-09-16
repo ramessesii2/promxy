@@ -102,3 +102,19 @@ promxy:
       # meaning if this servergroup returns and error and others don't the overall
       # query can still succeed
       ignore_error: true
+
+  # Alerting configuration for custom generator URLs
+  alerting:
+    # Generator URL template using Go template syntax
+    # Available variables: .ExternalURL, .Expr, .Labels, .Annotations, .AlertName
+    # 
+    # Examples:
+    #
+    # For Grafana alerting page (filters to specific alert):
+    # generator_url_template: "https://grafana.example.com/alerting/groups?queryString=alertname%3D%22{{.AlertName | urlquery}}%22{{if .Labels.cluster}}%20cluster%3D%22{{.Labels.cluster | urlquery}}%22{{end}}"
+    # 
+    # For custom dashboard:
+    # generator_url_template: "https://dashboard.example.com/alerts?alert={{.AlertName | urlquery}}&cluster={{.Labels.cluster | urlquery}}"
+    # 
+    # Default (Prometheus-style):
+    generator_url_template: "{{.ExternalURL}}/graph?g0.expr={{.Expr | urlquery}}&g0.tab=1"
